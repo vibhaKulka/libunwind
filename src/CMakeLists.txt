@@ -95,6 +95,9 @@ if (APPLE)
   endif ()
 endif ()
 
+# disable sanitizers
+list(APPEND LIBUNWIND_COMPILE_FLAGS -fno-sanitize=all)
+
 string(REPLACE ";" " " LIBUNWIND_COMPILE_FLAGS "${LIBUNWIND_COMPILE_FLAGS}")
 string(REPLACE ";" " " LIBUNWIND_CXX_FLAGS "${LIBUNWIND_CXX_FLAGS}")
 string(REPLACE ";" " " LIBUNWIND_C_FLAGS "${LIBUNWIND_C_FLAGS}")
