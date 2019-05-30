@@ -25,6 +25,44 @@
 
 namespace libunwind {
 
+enum {
+  kMaxRegisterNumber = _LIBUNWIND_HIGHEST_DWARF_REGISTER
+};
+
+enum RegisterSavedWhere {
+  kRegisterUnused,
+  kRegisterInCFA,
+  kRegisterOffsetFromCFA,
+  kRegisterInRegister,
+  kRegisterAtExpression,
+  kRegisterIsExpression
+};
+
+struct RegisterLocation {
+  RegisterSavedWhere location;
+  int64_t value;
+};
+
+/// Information about a frame layout and registers saved determined
+/// by "running" the DWARF FDE "instructions"
+struct PrologInfo {
+  uint32_t          cfaRegister;
+  int32_t           cfaRegisterOffset;  // CFA = (cfaRegister)+cfaRegisterOffset
+  int64_t           cfaExpression;      // CFA = expression
+  uint32_t          spExtraArgSize;
+  uint32_t          codeOffsetAtStackDecrement;
+  bool              registersInOtherRegisters;
+  bool              sameValueUsed;
+  RegisterLocation  savedRegisters[kMaxRegisterNumber + 1];
+};
+
+struct PrologInfoStackEntry {
+  PrologInfoStackEntry(PrologInfoStackEntry *n, const PrologInfo &i)
+      : next(n), info(i) {}
+  PrologInfoStackEntry *next;
+  PrologInfo info;
+};
+
 /// CFI_Parser does basic parsing of a CFI (Call Frame Information) records.
 /// See DWARF Spec for details:
 ///    http://refspecs.linuxbase.org/LSB_3.1.0/LSB-Core-generic/LSB-Core-generic/ehframechpt.html
@@ -64,41 +102,6 @@ public:
     pint_t  lsda;
   };
 
-  enum {
-    kMaxRegisterNumber = _LIBUNWIND_HIGHEST_DWARF_REGISTER
-  };
-  enum RegisterSavedWhere {
-    kRegisterUnused,
-    kRegisterInCFA,
-    kRegisterOffsetFromCFA,
-    kRegisterInRegister,
-    kRegisterAtExpression,
-    kRegisterIsExpression
-  };
-  struct RegisterLocation {
-    RegisterSavedWhere location;
-    int64_t value;
-  };
-  /// Information about a frame layout and registers saved determined
-  /// by "running" the DWARF FDE "instructions"
-  struct PrologInfo {
-    uint32_t          cfaRegister;
-    int32_t           cfaRegisterOffset;  // CFA = (cfaRegister)+cfaRegisterOffset
-    int64_t           cfaExpression;      // CFA = expression
-    uint32_t          spExtraArgSize;
-    uint32_t          codeOffsetAtStackDecrement;
-    bool              registersInOtherRegisters;
-    bool              sameValueUsed;
-    RegisterLocation  savedRegisters[kMaxRegisterNumber + 1];
-  };
-
-  struct PrologInfoStackEntry {
-    PrologInfoStackEntry(PrologInfoStackEntry *n, const PrologInfo &i)
-        : next(n), info(i) {}
-    PrologInfoStackEntry *next;
-    PrologInfo info;
-  };
-
   static bool findFDE(A &addressSpace, pint_t pc, pint_t ehSectionStart,
                       uint32_t sectionLength, pint_t fdeHint, FDE_Info *fdeInfo,
                       CIE_Info *cieInfo);
@@ -116,7 +119,41 @@ private:
                                 pint_t pcoffset,
                                 PrologInfoStackEntry *&rememberStack, int arch,
                                 PrologInfo *results);
+
 };
+
+namespace {
+// DWARF instructions DW_CFA_remember_state and DW_CFA_restore_state require
+// stack. We cannot take malloc as it is not signal safe. mmap is technically
+// signal safe but allocates pages too slow. Small thread_local buffer is
+// introduced instead along with upper bound on maximum stack depth
+// Note that no more than 2 stacks can be unwinding at one time inside selected
+// thread so we multiply buffer capacity by 2
+
+constexpr size_t entrySize = sizeof(libunwind::PrologInfoStackEntry);
+constexpr size_t bufferCapacity = 2 * entrySize * LIBUNWIND_MAX_STACK_SIZE;
+thread_local size_t bufferSize = 0;
+thread_local char buffer[bufferCapacity];
+
+void *pushStackEntry() {
+  if (bufferSize + entrySize > bufferCapacity) {
+    abort();
+  }
+
+  void* result = static_cast<void *>(buffer + bufferSize);
+  bufferSize += entrySize;
+  return result;
+}
+
+void popStackEntry() {
+  if (bufferSize < entrySize) {
+    abort();
+  }
+
+  bufferSize -= entrySize;
+}
+
+}
 
 /// Parse a FDE into a CIE_Info and an FDE_Info
 template <typename A>
@@ -391,9 +428,7 @@ bool CFI_Parser<A>::parseInstructions(A &addressSpace, pint_t instructions,
     uint64_t length;
     uint8_t opcode = addressSpace.get8(p);
     uint8_t operand;
-#if !defined(_LIBUNWIND_NO_HEAP)
     PrologInfoStackEntry *entry;
-#endif
     ++p;
     switch (opcode) {
     case DW_CFA_nop:
@@ -493,10 +528,9 @@ bool CFI_Parser<A>::parseInstructions(A &addressSpace, pint_t instructions,
       _LIBUNWIND_TRACE_DWARF(
           "DW_CFA_register(reg=%" PRIu64 ", reg2=%" PRIu64 ")\n", reg, reg2);
       break;
-#if !defined(_LIBUNWIND_NO_HEAP)
     case DW_CFA_remember_state:
       // avoid operator new, because that would be an upward dependency
-      entry = (PrologInfoStackEntry *)malloc(sizeof(PrologInfoStackEntry));
+      entry = (PrologInfoStackEntry *)pushStackEntry();
       if (entry != NULL) {
         entry->next = rememberStack;
         entry->info = *results;
@@ -511,13 +545,12 @@ bool CFI_Parser<A>::parseInstructions(A &addressSpace, pint_t instructions,
         PrologInfoStackEntry *top = rememberStack;
         *results = top->info;
         rememberStack = top->next;
-        free((char *)top);
+        popStackEntry();
       } else {
         return false;
       }
       _LIBUNWIND_TRACE_DWARF("DW_CFA_restore_state\n");
       break;
-#endif
     case DW_CFA_def_cfa:
       reg = addressSpace.getULEB128(p, instructionsEnd);
       offset = (int64_t)addressSpace.getULEB128(p, instructionsEnd);

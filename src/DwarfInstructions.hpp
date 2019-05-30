@@ -46,8 +46,6 @@ private:
     DW_X86_RET_ADDR = 8
   };
 
-  typedef typename CFI_Parser<A>::RegisterLocation  RegisterLocation;
-  typedef typename CFI_Parser<A>::PrologInfo        PrologInfo;
   typedef typename CFI_Parser<A>::FDE_Info          FDE_Info;
   typedef typename CFI_Parser<A>::CIE_Info          CIE_Info;
 
@@ -63,9 +61,16 @@ private:
 
   static pint_t getCFA(A &addressSpace, const PrologInfo &prolog,
                        const R &registers) {
-    if (prolog.cfaRegister != 0)
-      return (pint_t)((sint_t)registers.getRegister((int)prolog.cfaRegister) +
+if (prolog.cfaRegister != 0) {
+      pint_t cfa = (pint_t)((sint_t)registers.getRegister((int)prolog.cfaRegister) +
              prolog.cfaRegisterOffset);
+#if defined(__x86_64__)
+      if (prolog.cfaRegister == UNW_X86_64_RSP)
+          cfa -= prolog.spExtraArgSize;
+#endif
+      return cfa;
+    }
+
     if (prolog.cfaExpression != 0)
       return evaluateExpression((pint_t)prolog.cfaExpression, addressSpace, 
                                 registers, 0);
@@ -80,22 +85,22 @@ typename A::pint_t DwarfInstructions<A, R>::getSavedRegister(
     A &addressSpace, const R &registers, pint_t cfa,
     const RegisterLocation &savedReg) {
   switch (savedReg.location) {
-  case CFI_Parser<A>::kRegisterInCFA:
+  case kRegisterInCFA:
     return (pint_t)addressSpace.getRegister(cfa + (pint_t)savedReg.value);
 
-  case CFI_Parser<A>::kRegisterAtExpression:
+  case kRegisterAtExpression:
     return (pint_t)addressSpace.getRegister(evaluateExpression(
         (pint_t)savedReg.value, addressSpace, registers, cfa));
 
-  case CFI_Parser<A>::kRegisterIsExpression:
+  case kRegisterIsExpression:
     return evaluateExpression((pint_t)savedReg.value, addressSpace,
                               registers, cfa);
 
-  case CFI_Parser<A>::kRegisterInRegister:
+  case kRegisterInRegister:
     return registers.getRegister((int)savedReg.value);
 
-  case CFI_Parser<A>::kRegisterUnused:
-  case CFI_Parser<A>::kRegisterOffsetFromCFA:
+  case kRegisterUnused:
+  case kRegisterOffsetFromCFA:
     // FIX ME
     break;
   }
@@ -107,18 +112,18 @@ double DwarfInstructions<A, R>::getSavedFloatRegister(
     A &addressSpace, const R &registers, pint_t cfa,
     const RegisterLocation &savedReg) {
   switch (savedReg.location) {
-  case CFI_Parser<A>::kRegisterInCFA:
+  case kRegisterInCFA:
     return addressSpace.getDouble(cfa + (pint_t)savedReg.value);
 
-  case CFI_Parser<A>::kRegisterAtExpression:
+  case kRegisterAtExpression:
     return addressSpace.getDouble(
         evaluateExpression((pint_t)savedReg.value, addressSpace,
                             registers, cfa));
 
-  case CFI_Parser<A>::kRegisterIsExpression:
-  case CFI_Parser<A>::kRegisterUnused:
-  case CFI_Parser<A>::kRegisterOffsetFromCFA:
-  case CFI_Parser<A>::kRegisterInRegister:
+  case kRegisterIsExpression:
+  case kRegisterUnused:
+  case kRegisterOffsetFromCFA:
+  case kRegisterInRegister:
     // FIX ME
     break;
   }
@@ -130,18 +135,18 @@ v128 DwarfInstructions<A, R>::getSavedVectorRegister(
     A &addressSpace, const R &registers, pint_t cfa,
     const RegisterLocation &savedReg) {
   switch (savedReg.location) {
-  case CFI_Parser<A>::kRegisterInCFA:
+  case kRegisterInCFA:
     return addressSpace.getVector(cfa + (pint_t)savedReg.value);
 
-  case CFI_Parser<A>::kRegisterAtExpression:
+  case kRegisterAtExpression:
     return addressSpace.getVector(
         evaluateExpression((pint_t)savedReg.value, addressSpace,
                             registers, cfa));
 
-  case CFI_Parser<A>::kRegisterIsExpression:
-  case CFI_Parser<A>::kRegisterUnused:
-  case CFI_Parser<A>::kRegisterOffsetFromCFA:
-  case CFI_Parser<A>::kRegisterInRegister:
+  case kRegisterIsExpression:
+  case kRegisterUnused:
+  case kRegisterOffsetFromCFA:
+  case kRegisterInRegister:
     // FIX ME
     break;
   }
@@ -170,8 +175,7 @@ int DwarfInstructions<A, R>::stepWithDwarf(A &addressSpace, pint_t pc,
       assert(lastReg >= (int)cieInfo.returnAddressRegister &&
              "register range does not contain return address register");
       for (int i = 0; i <= lastReg; ++i) {
-        if (prolog.savedRegisters[i].location !=
-            CFI_Parser<A>::kRegisterUnused) {
+        if (prolog.savedRegisters[i].location != kRegisterUnused) {
           if (registers.validFloatRegister(i))
             newRegisters.setFloatRegister(
                 i, getSavedFloatRegister(addressSpace, registers, cfa,

@@ -43,6 +43,8 @@
   #define LIBUNWIND_AVAIL
 #endif
 
+#define LIBUNWIND_MAX_STACK_SIZE 1024
+
 /* error codes */
 enum {
   UNW_ESUCCESS      = 0,     /* no error */

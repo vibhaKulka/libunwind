@@ -1486,7 +1486,7 @@ bool UnwindCursor<A, R>::getInfoFromDwarfSection(pint_t pc,
                                       &fdeInfo, &cieInfo);
   }
   if (foundFDE) {
-    typename CFI_Parser<A>::PrologInfo prolog;
+    PrologInfo prolog;
     if (CFI_Parser<A>::parseFDEInstructions(_addressSpace, fdeInfo, cieInfo, pc,
                                             R::getArch(), &prolog)) {
       // Save off parsed FDE info
@@ -1901,7 +1901,7 @@ void UnwindCursor<A, R>::setInfoBasedOnIPRegister(bool isReturnAddress) {
     const char *msg = CFI_Parser<A>::decodeFDE(_addressSpace,
                                                 cachedFDE, &fdeInfo, &cieInfo);
     if (msg == NULL) {
-      typename CFI_Parser<A>::PrologInfo prolog;
+      PrologInfo prolog;
       if (CFI_Parser<A>::parseFDEInstructions(_addressSpace, fdeInfo, cieInfo,
                                               pc, R::getArch(), &prolog)) {
         // save off parsed FDE info
@@ -1931,7 +1931,7 @@ void UnwindCursor<A, R>::setInfoBasedOnIPRegister(bool isReturnAddress) {
     if (!CFI_Parser<A>::decodeFDE(_addressSpace, fde, &fdeInfo, &cieInfo)) {
       // Double check this FDE is for a function that includes the pc.
       if ((fdeInfo.pcStart <= pc) && (pc < fdeInfo.pcEnd)) {
-        typename CFI_Parser<A>::PrologInfo prolog;
+        PrologInfo prolog;
         if (CFI_Parser<A>::parseFDEInstructions(_addressSpace, fdeInfo, cieInfo,
                                                 pc, R::getArch(), &prolog)) {
           // save off parsed FDE info
