@@ -63,6 +63,44 @@ struct PrologInfoStackEntry {
   PrologInfo info;
 };
 
+}
+
+namespace {
+// DWARF instructions DW_CFA_remember_state and DW_CFA_restore_state require
+// stack. We cannot use malloc as it is not signal safe. mmap is technically
+// signal safe but allocates pages too slow. Small buffer is introduced instead
+// along with upper bound on maximum stack depth
+
+class StackGuard {
+public:
+    void *push() {
+        if (size + entrySize > capacity) {
+            abort();
+        }
+
+        void* result = static_cast<void *>(buffer + size);
+        size += entrySize;
+        return result;
+    }
+
+    void pop() {
+        if (size < entrySize) {
+            abort();
+        }
+
+        size -= entrySize;
+    }
+
+private:
+    static constexpr size_t entrySize = sizeof(libunwind::PrologInfoStackEntry);
+    static constexpr size_t capacity = entrySize * LIBUNWIND_MAX_STACK_SIZE;
+
+    size_t size = 0;
+    char buffer[capacity];
+};
+}
+
+namespace libunwind {
 /// CFI_Parser does basic parsing of a CFI (Call Frame Information) records.
 /// See DWARF Spec for details:
 ///    http://refspecs.linuxbase.org/LSB_3.1.0/LSB-Core-generic/LSB-Core-generic/ehframechpt.html
@@ -118,42 +156,11 @@ private:
                                 pint_t instructionsEnd, const CIE_Info &cieInfo,
                                 pint_t pcoffset,
                                 PrologInfoStackEntry *&rememberStack, int arch,
-                                PrologInfo *results);
+                                PrologInfo *results,
+                                StackGuard &stack);
 
 };
 
-namespace {
-// DWARF instructions DW_CFA_remember_state and DW_CFA_restore_state require
-// stack. We cannot take malloc as it is not signal safe. mmap is technically
-// signal safe but allocates pages too slow. Small thread_local buffer is
-// introduced instead along with upper bound on maximum stack depth
-// Note that no more than 2 stacks can be unwinding at one time inside selected
-// thread so we multiply buffer capacity by 2
-
-constexpr size_t entrySize = sizeof(libunwind::PrologInfoStackEntry);
-constexpr size_t bufferCapacity = 2 * entrySize * LIBUNWIND_MAX_STACK_SIZE;
-thread_local size_t bufferSize = 0;
-thread_local char buffer[bufferCapacity];
-
-void *pushStackEntry() {
-  if (bufferSize + entrySize > bufferCapacity) {
-    abort();
-  }
-
-  void* result = static_cast<void *>(buffer + bufferSize);
-  bufferSize += entrySize;
-  return result;
-}
-
-void popStackEntry() {
-  if (bufferSize < entrySize) {
-    abort();
-  }
-
-  bufferSize -= entrySize;
-}
-
-}
 
 /// Parse a FDE into a CIE_Info and an FDE_Info
 template <typename A>
@@ -396,14 +403,16 @@ bool CFI_Parser<A>::parseFDEInstructions(A &addressSpace,
   memset(results, '\0', sizeof(PrologInfo));
   PrologInfoStackEntry *rememberStack = NULL;
 
+  StackGuard stack;
+
   // parse CIE then FDE instructions
   return parseInstructions(addressSpace, cieInfo.cieInstructions,
                            cieInfo.cieStart + cieInfo.cieLength, cieInfo,
-                           (pint_t)(-1), rememberStack, arch, results) &&
+                           (pint_t)(-1), rememberStack, arch, results, stack) &&
          parseInstructions(addressSpace, fdeInfo.fdeInstructions,
                            fdeInfo.fdeStart + fdeInfo.fdeLength, cieInfo,
                            upToPC - fdeInfo.pcStart, rememberStack, arch,
-                           results);
+                           results, stack);
 }
 
 /// "run" the DWARF instructions
@@ -412,7 +421,8 @@ bool CFI_Parser<A>::parseInstructions(A &addressSpace, pint_t instructions,
                                       pint_t instructionsEnd,
                                       const CIE_Info &cieInfo, pint_t pcoffset,
                                       PrologInfoStackEntry *&rememberStack,
-                                      int arch, PrologInfo *results) {
+                                      int arch, PrologInfo *results,
+                                      StackGuard &stack) {
   pint_t p = instructions;
   pint_t codeOffset = 0;
   PrologInfo initialState = *results;
@@ -530,7 +540,7 @@ bool CFI_Parser<A>::parseInstructions(A &addressSpace, pint_t instructions,
       break;
     case DW_CFA_remember_state:
       // avoid operator new, because that would be an upward dependency
-      entry = (PrologInfoStackEntry *)pushStackEntry();
+      entry = (PrologInfoStackEntry *)stack.push();
       if (entry != NULL) {
         entry->next = rememberStack;
         entry->info = *results;
@@ -545,7 +555,7 @@ bool CFI_Parser<A>::parseInstructions(A &addressSpace, pint_t instructions,
         PrologInfoStackEntry *top = rememberStack;
         *results = top->info;
         rememberStack = top->next;
-        popStackEntry();
+        stack.pop();
       } else {
         return false;
       }
