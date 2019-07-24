@@ -16,6 +16,9 @@
 #include <stdio.h>
 #include <stdlib.h>
 
+#include <unistd.h>
+#include <sys/syscall.h>
+
 #include "dwarf2.h"
 #include "Registers.hpp"
 #include "DwarfParser.hpp"
