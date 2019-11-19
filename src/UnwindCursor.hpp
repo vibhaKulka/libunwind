@@ -1457,7 +1457,6 @@ bool UnwindCursor<A, R>::getInfoFromDwarfSection(pint_t pc,
   typename CFI_Parser<A>::FDE_Info fdeInfo;
   typename CFI_Parser<A>::CIE_Info cieInfo;
   bool foundFDE = false;
-  bool foundInCache = false;
   // If compact encoding table gave offset into dwarf section, go directly there
   if (fdeSectionOffsetHint != 0) {
     foundFDE = CFI_Parser<A>::findFDE(_addressSpace, pc, sects.dwarf_section,
@@ -1472,13 +1471,12 @@ bool UnwindCursor<A, R>::getInfoFromDwarfSection(pint_t pc,
         (uint32_t)sects.dwarf_index_section_length, &fdeInfo, &cieInfo);
   }
 #endif
-  if (!foundFDE) {
 #if !defined(_LIBUNWIND_NO_HEAP)
+  bool foundInCache = false;
+
+  if (!foundFDE) {
     // otherwise, search cache of previously found FDEs.
     pint_t cachedFDE = DwarfFDECache<A>::findFDE(sects.dso_base, pc);
-#else
-    pint_t cachedFDE = 0;
-#endif
     if (cachedFDE != 0) {
       foundFDE =
           CFI_Parser<A>::findFDE(_addressSpace, pc, sects.dwarf_section,
@@ -1487,6 +1485,8 @@ bool UnwindCursor<A, R>::getInfoFromDwarfSection(pint_t pc,
       foundInCache = foundFDE;
     }
   }
+#endif
+
   if (!foundFDE) {
     // Still not found, do full scan of __eh_frame section.
     foundFDE = CFI_Parser<A>::findFDE(_addressSpace, pc, sects.dwarf_section,
