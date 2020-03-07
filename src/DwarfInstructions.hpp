@@ -169,18 +169,6 @@ int DwarfInstructions<A, R>::stepWithDwarf(A &addressSpace, pint_t pc,
       // get pointer to cfa (architecture specific)
       pint_t cfa = getCFA(addressSpace, prolog, registers);
 
-      // Check validity of the CFA.
-      // This is a very dirty hack (inspired by original libunwind version).
-      // Motivation: sometimes libunwind parse wrong value instead of CFA.
-      // We check that memory address belongs to our process by issuing "mincore" syscall.
-      // Actually we don't care if the address is in core or not, we only check return code.
-      // If Address Sanitizer will argue, replace syscall to inline assembly.
-      {
-        unsigned char mincore_res = 0;
-        if (0 != syscall(SYS_mincore, (void*)(cfa / 4096 * 4096), 1, &mincore_res))
-          return UNW_EBADFRAME;
-      }
-
        // restore registers that DWARF says were saved
       R newRegisters = registers;
       pint_t returnAddress = 0;
