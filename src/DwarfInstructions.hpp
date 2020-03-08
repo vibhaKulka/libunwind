@@ -15,6 +15,7 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <errno.h>
 
 #include <unistd.h>
 #include <sys/syscall.h>
@@ -177,7 +178,7 @@ int DwarfInstructions<A, R>::stepWithDwarf(A &addressSpace, pint_t pc,
       // If Address Sanitizer will argue, replace syscall to inline assembly.
       {
         unsigned char mincore_res = 0;
-        if (0 != syscall(SYS_mincore, (void*)(cfa / 4096 * 4096), 1, &mincore_res))
+        if (0 != syscall(SYS_mincore, (void*)(cfa / 4096 * 4096), 1, &mincore_res) && errno != ENOSYS)
           return UNW_EBADFRAME;
       }
 
