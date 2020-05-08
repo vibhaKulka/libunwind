@@ -65,16 +65,9 @@ private:
 
   static pint_t getCFA(A &addressSpace, const PrologInfo &prolog,
                        const R &registers) {
-if (prolog.cfaRegister != 0) {
-      pint_t cfa = (pint_t)((sint_t)registers.getRegister((int)prolog.cfaRegister) +
+    if (prolog.cfaRegister != 0)
+      return (pint_t)((sint_t)registers.getRegister((int)prolog.cfaRegister) +
              prolog.cfaRegisterOffset);
-#if defined(__x86_64__)
-      if (prolog.cfaRegister == UNW_X86_64_RSP)
-          cfa -= prolog.spExtraArgSize;
-#endif
-      return cfa;
-    }
-
     if (prolog.cfaExpression != 0)
       return evaluateExpression((pint_t)prolog.cfaExpression, addressSpace,
                                 registers, 0);
