@@ -8,8 +8,6 @@
 //===----------------------------------------------------------------------===//
 
 #include "config.h"
-#include "AddressSpace.hpp"
-#include "DwarfParser.hpp"
 
 
 // private keymgr stuff
