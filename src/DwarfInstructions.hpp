@@ -150,6 +150,21 @@ v128 DwarfInstructions<A, R>::getSavedVectorRegister(
   _LIBUNWIND_ABORT("unsupported restore location for vector register");
 }
 
+
+// Check validity of the CFA.
+// This is a very dirty hack (inspired by original libunwind version).
+// Motivation: sometimes libunwind parse wrong value instead of CFA.
+// We check that memory address belongs to our process by issuing "mincore" syscall.
+// Actually we don't care if the address is in core or not, we only check return code.
+// If Address Sanitizer will argue, replace syscall to inline assembly.
+template <typename pint_t>
+static bool isPointerValid(pint_t ptr)
+{
+  unsigned char mincore_res = 0;
+  return ptr && (0 == syscall(SYS_mincore, (void*)(ptr / 4096 * 4096), 1, &mincore_res) || errno == ENOSYS);
+}
+
+
 template <typename A, typename R>
 int DwarfInstructions<A, R>::stepWithDwarf(A &addressSpace, pint_t pc,
                                            pint_t fdeStart, R &registers) {
@@ -163,17 +178,8 @@ int DwarfInstructions<A, R>::stepWithDwarf(A &addressSpace, pint_t pc,
       // get pointer to cfa (architecture specific)
       pint_t cfa = getCFA(addressSpace, prolog, registers);
 
-      // Check validity of the CFA.
-      // This is a very dirty hack (inspired by original libunwind version).
-      // Motivation: sometimes libunwind parse wrong value instead of CFA.
-      // We check that memory address belongs to our process by issuing "mincore" syscall.
-      // Actually we don't care if the address is in core or not, we only check return code.
-      // If Address Sanitizer will argue, replace syscall to inline assembly.
-      {
-        unsigned char mincore_res = 0;
-        if (0 != syscall(SYS_mincore, (void*)(cfa / 4096 * 4096), 1, &mincore_res) && errno != ENOSYS)
+      if (!isPointerValid(cfa))
           return UNW_EBADFRAME;
-      }
 
        // restore registers that DWARF says were saved
       R newRegisters = registers;
@@ -298,6 +304,12 @@ DwarfInstructions<A, R>::evaluateExpression(pint_t expression, A &addressSpace,
     case DW_OP_deref:
       // pop stack, dereference, push result
       value = *sp--;
+      // Some libraries may have wrong DWARF expression (that's used to calculate CFA).
+      // Due to: - bug in compiler; - bug in manually written assembly code.
+      // Using this expression to dereference a pointer may cause segfault.
+      // Note: zero return value will be subsequently checked in the 'stepWithDwarf' function.
+      if (!isPointerValid(value))
+          return 0;
       *(++sp) = addressSpace.getP(value);
       if (log)
         fprintf(stderr, "dereference 0x%" PRIx64 "\n", (uint64_t)value);
@@ -762,6 +774,8 @@ DwarfInstructions<A, R>::evaluateExpression(pint_t expression, A &addressSpace,
     case DW_OP_deref_size:
       // pop stack, dereference, push result
       value = *sp--;
+      if (!isPointerValid(value))
+          return 0;
       switch (addressSpace.get8(p++)) {
       case 1:
         value = addressSpace.get8(value);
