@@ -401,6 +401,8 @@ bool CFI_Parser<A>::parseFDEInstructions(A &addressSpace,
                                          int arch, PrologInfo *results) {
   // clear results
   memset(results, '\0', sizeof(PrologInfo));
+  results->cfaRegister = (uint32_t)(-1);
+
   PrologInfoStackEntry *rememberStack = NULL;
 
   StackGuard stack;
@@ -591,7 +593,7 @@ bool CFI_Parser<A>::parseInstructions(A &addressSpace, pint_t instructions,
                              results->cfaRegisterOffset);
       break;
     case DW_CFA_def_cfa_expression:
-      results->cfaRegister = 0;
+      results->cfaRegister = (uint32_t)(-1);
       results->cfaExpression = (int64_t)p;
       length = addressSpace.getULEB128(p, instructionsEnd);
       assert(length < static_cast<pint_t>(~0) && "pointer overflow");
