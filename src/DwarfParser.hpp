@@ -85,8 +85,8 @@ private:
     static constexpr size_t entrySize = sizeof(FreeListEntry);
     static constexpr size_t buffer_size = LIBUNWIND_MAX_STACK_SIZE * entrySize;
     static char buffer[buffer_size];
-    static size_t next_not_allocated_entry;
-    static void * next_allocated_entry;
+    static _Atomic size_t next_not_allocated_entry;
+    static void * _Atomic next_allocated_entry;
 
 public:
     static FreeListEntry * alloc()
