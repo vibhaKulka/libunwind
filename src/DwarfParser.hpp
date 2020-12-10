@@ -16,6 +16,7 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <stdatomic.h>
 
 #include "libunwind.h"
 #include "dwarf2.h"
@@ -71,32 +72,88 @@ namespace {
 // signal safe but allocates pages too slow. Small buffer is introduced instead
 // along with upper bound on maximum stack depth
 
-class StackGuard {
+class StackBuffer
+{
 public:
-    void *push() {
-        if (size + entrySize > capacity) {
-            abort();
+    struct FreeListEntry
+    {
+        FreeListEntry * next = nullptr;
+        char buffer[sizeof(libunwind::PrologInfoStackEntry)];
+    };
+
+private:
+    static constexpr size_t entrySize = sizeof(FreeListEntry);
+    static constexpr size_t buffer_size = LIBUNWIND_MAX_STACK_SIZE * entrySize;
+    static char buffer[buffer_size];
+    static size_t next_not_allocated_entry;
+    static void * next_allocated_entry;
+
+public:
+    static FreeListEntry * alloc()
+    {
+        /// At first, try to get element from free list.
+        {
+            void * expected = nullptr;
+            void * desired = nullptr;
+            while (!atomic_compare_exchange_weak(&next_allocated_entry, &expected, &desired))
+            {
+                if (expected == nullptr)
+                    break;
+
+                desired = static_cast<FreeListEntry *>(expected)->next;
+            }
+
+            if (expected)
+                return static_cast<FreeListEntry *>(expected);
         }
 
-        void* result = static_cast<void *>(buffer + size);
-        size += entrySize;
-        return result;
+        size_t prev = atomic_fetch_add(&next_not_allocated_entry, 1);
+        if (prev >= buffer_size)
+            abort();
+
+        return reinterpret_cast<FreeListEntry *>(buffer + prev * entrySize);
+    }
+
+    static void free(FreeListEntry * entry)
+    {
+        void * expected = nullptr;
+        entry->next = nullptr;
+
+        while (!atomic_compare_exchange_weak(&next_allocated_entry, &expected, &entry))
+        {
+            entry->next = static_cast<FreeListEntry *>(expected);
+        }
+    }
+};
+
+class StackGuard {
+public:
+    void * push()
+    {
+        StackBuffer::FreeListEntry * entry = StackBuffer::alloc();
+        entry->next = stack_top;
+        stack_top = entry;
+        return stack_top;
     }
 
     void pop() {
-        if (size < entrySize) {
+        if (stack_top == nullptr)
             abort();
-        }
 
-        size -= entrySize;
+        StackBuffer::FreeListEntry * entry = stack_top;
+        stack_top = stack_top->next;
+
+        StackBuffer::free(entry);
+    }
+
+    ~StackGuard()
+    {
+        while (stack_top)
+            pop();
     }
 
 private:
-    static constexpr size_t entrySize = sizeof(libunwind::PrologInfoStackEntry);
-    static constexpr size_t capacity = entrySize * LIBUNWIND_MAX_STACK_SIZE;
-
-    size_t size = 0;
-    char buffer[capacity];
+    StackBuffer::FreeListEntry * stack_top = nullptr;
 };
 }
 
