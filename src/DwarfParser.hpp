@@ -16,7 +16,7 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
-#include <stdatomic.h>
+#include <atomic>
 
 #include "libunwind.h"
 #include "dwarf2.h"
@@ -85,29 +85,29 @@ private:
     static constexpr size_t entrySize = sizeof(FreeListEntry);
     static constexpr size_t buffer_size = LIBUNWIND_MAX_STACK_SIZE * entrySize;
     static char buffer[buffer_size];
-    static _Atomic size_t next_not_allocated_entry;
-    static void * _Atomic next_allocated_entry;
+    static std::atomic<size_t> next_not_allocated_entry;
+    static std::atomic<FreeListEntry *> next_allocated_entry;
 
 public:
     static FreeListEntry * alloc()
     {
         /// At first, try to get element from free list.
         {
-            void * expected = nullptr;
-            void * desired = nullptr;
-            while (!atomic_compare_exchange_weak(&next_allocated_entry, &expected, desired))
+            FreeListEntry * expected = nullptr;
+            FreeListEntry * desired = nullptr;
+            while (!next_allocated_entry.compare_exchange_weak(expected, desired))
             {
                 if (expected == nullptr)
                     break;
 
-                desired = static_cast<FreeListEntry *>(expected)->next;
+                desired = expected->next;
             }
 
             if (expected)
-                return static_cast<FreeListEntry *>(expected);
+                return expected;
         }
 
-        size_t prev = atomic_fetch_add(&next_not_allocated_entry, 1);
+        size_t prev = next_not_allocated_entry.fetch_add(1);
         if (prev >= buffer_size)
             abort();
 
@@ -116,12 +116,12 @@ public:
 
     static void free(FreeListEntry * entry)
     {
-        void * expected = nullptr;
-        entry->next = nullptr;
+        FreeListEntry * expected = nullptr;
+        entry->next = expected;
 
-        while (!atomic_compare_exchange_weak(&next_allocated_entry, &expected, entry))
+        while (!next_allocated_entry.compare_exchange_weak(expected, entry))
         {
-            entry->next = static_cast<FreeListEntry *>(expected);
+            entry->next = expected;
         }
     }
 };
