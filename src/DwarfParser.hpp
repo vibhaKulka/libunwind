@@ -95,7 +95,7 @@ public:
         {
             void * expected = nullptr;
             void * desired = nullptr;
-            while (!atomic_compare_exchange_weak(&next_allocated_entry, &expected, &desired))
+            while (!atomic_compare_exchange_weak(&next_allocated_entry, &expected, desired))
             {
                 if (expected == nullptr)
                     break;
@@ -119,7 +119,7 @@ public:
         void * expected = nullptr;
         entry->next = nullptr;
 
-        while (!atomic_compare_exchange_weak(&next_allocated_entry, &expected, &entry))
+        while (!atomic_compare_exchange_weak(&next_allocated_entry, &expected, entry))
         {
             entry->next = static_cast<FreeListEntry *>(expected);
         }
@@ -133,7 +133,7 @@ public:
         StackBuffer::FreeListEntry * entry = StackBuffer::alloc();
         entry->next = stack_top;
         stack_top = entry;
-        return stack_top;
+        return stack_top->buffer;
     }
 
     void pop() {
