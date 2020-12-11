@@ -95,20 +95,20 @@ private:
     static _Atomic size_t next_not_allocated_entry;
     static void * _Atomic next_allocated_entry;
 
-    bool atomic_compare_exchange_weak_wrapper(void * _Atomic & ptr, void *& expected, void * desired)
+    static bool atomic_compare_exchange_weak_wrapper(void * _Atomic & ptr, void *& expected, void * desired)
     {
 #ifdef __GNUC__
         return __atomic_compare_exchange_n(&ptr, &expected, desired, 1, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST);
-#elseif
+#else
         return atomic_compare_exchange_weak(&ptr, &expected, desired);
 #endif
     }
 
-    size_t atomic_fetch_add_wrapper(void * _Atomic & ptr, size_t val)
+    static size_t atomic_fetch_add_wrapper(_Atomic size_t & ptr, size_t val)
     {
 #ifdef __GNUC__
         return __atomic_add_fetch(&ptr, val, __ATOMIC_SEQ_CST);
-#elseif
+#else
         return atomic_fetch_add(&ptr, val);
 #endif
     }
