@@ -101,7 +101,7 @@ private:
 
     static size_t atomic_fetch_add_wrapper(size_t & ptr, size_t val)
     {
-        return __atomic_add_fetch(&ptr, val, __ATOMIC_SEQ_CST);
+        return __atomic_fetch_add(&ptr, val, __ATOMIC_SEQ_CST);
     }
 
     static void * atomic_load_wrapper(void *& ptr)
