@@ -16,7 +16,14 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
-#include <stdatomic.h>
+
+#ifdef __GNUC__
+    /// g++ does not support stdatomic.h and _Atomic (gcc and clang does)
+    /// will use g++ intrinsics for this case
+    #define _Atomic
+#else
+    #include <stdatomic.h>
+#endif
 
 #include "libunwind.h"
 #include "dwarf2.h"
@@ -88,6 +95,24 @@ private:
     static _Atomic size_t next_not_allocated_entry;
     static void * _Atomic next_allocated_entry;
 
+    bool atomic_compare_exchange_weak_wrapper(void * _Atomic & ptr, void *& expected, void * desired)
+    {
+#ifdef __GNUC__
+        return __atomic_compare_exchange_n(&ptr, &expected, desired, 1, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST);
+#elseif
+        return atomic_compare_exchange_weak(&ptr, &expected, desired);
+#endif
+    }
+
+    size_t atomic_fetch_add_wrapper(void * _Atomic & ptr, size_t val)
+    {
+#ifdef __GNUC__
+        return __atomic_add_fetch(&ptr, val, __ATOMIC_SEQ_CST);
+#elseif
+        return atomic_fetch_add(&ptr, val);
+#endif
+    }
+
 public:
     static FreeListEntry * alloc()
     {
@@ -95,7 +120,7 @@ public:
         {
             void * expected = nullptr;
             void * desired = nullptr;
-            while (!atomic_compare_exchange_weak(&next_allocated_entry, &expected, desired))
+            while (!atomic_compare_exchange_weak_wrapper(next_allocated_entry, expected, desired))
             {
                 if (expected == nullptr)
                     break;
@@ -107,7 +132,7 @@ public:
                 return static_cast<FreeListEntry *>(expected);
         }
 
-        size_t prev = atomic_fetch_add(&next_not_allocated_entry, 1);
+        size_t prev = atomic_fetch_add_wrapper(next_not_allocated_entry, 1);
         if (prev >= buffer_size)
             abort();
 
@@ -119,7 +144,7 @@ public:
         void * expected = nullptr;
         entry->next = nullptr;
 
-        while (!atomic_compare_exchange_weak(&next_allocated_entry, &expected, entry))
+        while (!atomic_compare_exchange_weak_wrapper(next_allocated_entry, expected, entry))
         {
             entry->next = static_cast<FreeListEntry *>(expected);
         }

@@ -306,8 +306,8 @@ int unw_backtrace(void **buffer, int size) {
 }
 
 char StackBuffer::buffer[];
-size_t _Atomic StackBuffer::next_not_allocated_entry = 0;
-void * _Atomic StackBuffer::next_allocated_entry = nullptr;
+std::atomic<size_t> StackBuffer::next_not_allocated_entry = 0;
+std::atomic<StackBuffer::FreeListEntry *> StackBuffer::next_allocated_entry = nullptr;
 
 
 // Add logging hooks in Debug builds only
