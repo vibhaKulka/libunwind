@@ -16,6 +16,7 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <sys/mman.h>
 
 #include "libunwind.h"
 #include "dwarf2.h"
@@ -66,37 +67,137 @@ struct PrologInfoStackEntry {
 }
 
 namespace {
-// DWARF instructions DW_CFA_remember_state and DW_CFA_restore_state require
-// stack. We cannot use malloc as it is not signal safe. mmap is technically
-// signal safe but allocates pages too slow. Small buffer is introduced instead
-// along with upper bound on maximum stack depth
+/// DWARF instructions DW_CFA_remember_state and DW_CFA_restore_state require stack.
+/// libunwind cannot use malloc to be signal safe.
+/// It also should not use mmap for every allocation as it is too slow.
+/// It can use pre-allocated buffer on stack, but it cannot be large (for coroutines) and cannot be small (it will be not enough).
+/// It also cannot use thread-local preallocated buffer because of coroutines.
+/// It can use pre-allocated global buffer, but thread synchronization is required.
+/// It cannot use mutex because of signal safety.
+/// And it cannot use standard C++ library headers because of libunwind is used to build C++.
+/// So, we use atomic operations over mmaped pre-allocated global buffer.
+class StackBuffer
+{
+public:
+    struct FreeListEntry
+    {
+        FreeListEntry * next = nullptr;
+        char buffer[sizeof(libunwind::PrologInfoStackEntry)];
+    };
+
+private:
+    static constexpr size_t entrySize = sizeof(FreeListEntry);
+    static constexpr size_t buffer_size = LIBUNWIND_MAX_STACK_SIZE * entrySize;
+    static void * buffer;
+    static size_t next_not_allocated_entry;
+    static void * next_allocated_entry;
+
+    /// Here we use intrinsics because g++ cannot use stdatomic.h, and using c++ atomics is not possible.
+    /// Wrappers are just in case other compiler has different intrinsics.
+    static bool atomic_compare_exchange_weak_wrapper(void * & ptr, void *& expected, void * desired)
+    {
+        return __atomic_compare_exchange_n(&ptr, &expected, desired, 1, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST);
+    }
+
+    static size_t atomic_fetch_add_wrapper(size_t & ptr, size_t val)
+    {
+        return __atomic_fetch_add(&ptr, val, __ATOMIC_SEQ_CST);
+    }
+
+    static void * atomic_load_wrapper(void *& ptr)
+    {
+        return __atomic_load_n(&ptr, __ATOMIC_SEQ_CST);
+    }
+
+    static void atomic_store_wrapper(void *& ptr, void * val)
+    {
+        __atomic_store_n(&ptr, val, __ATOMIC_SEQ_CST);
+    }
+
+public:
+    static FreeListEntry * alloc()
+    {
+        /// At first, try to get element from free list.
+        {
+            void * expected = nullptr;
+            void * desired = nullptr;
+            while (!atomic_compare_exchange_weak_wrapper(next_allocated_entry, expected, desired))
+            {
+                if (expected == nullptr)
+                    break;
+
+                desired = static_cast<FreeListEntry *>(expected)->next;
+            }
+
+            if (expected)
+                return static_cast<FreeListEntry *>(expected);
+        }
+
+        size_t prev = atomic_fetch_add_wrapper(next_not_allocated_entry, 1);
+
+        if (prev == 0)
+        {
+            /// I am the one who mmaps memory.
+            void * res = mmap(nullptr, buffer_size,
+                              PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+
+            if (MAP_FAILED == res)
+                abort();
+
+            atomic_store_wrapper(buffer, res);
+        }
+
+        if ((prev + 1) * entrySize >= buffer_size)
+            abort();
+
+        /// Life loop. In case memory was not allocated yet.
+        void * data = nullptr;
+        while (!data)
+            data = atomic_load_wrapper(buffer);
+
+        return reinterpret_cast<FreeListEntry *>(static_cast<FreeListEntry *>(data) + prev);
+    }
+
+    static void free(FreeListEntry * entry)
+    {
+        void * expected = nullptr;
+        entry->next = nullptr;
+
+        while (!atomic_compare_exchange_weak_wrapper(next_allocated_entry, expected, entry))
+        {
+            entry->next = static_cast<FreeListEntry *>(expected);
+        }
+    }
+};
 
 class StackGuard {
 public:
-    void *push() {
-        if (size + entrySize > capacity) {
-            abort();
-        }
-
-        void* result = static_cast<void *>(buffer + size);
-        size += entrySize;
-        return result;
+    void * push()
+    {
+        StackBuffer::FreeListEntry * entry = StackBuffer::alloc();
+        entry->next = stack_top;
+        stack_top = entry;
+        return stack_top->buffer;
     }
 
     void pop() {
-        if (size < entrySize) {
+        if (stack_top == nullptr)
             abort();
-        }
 
-        size -= entrySize;
+        StackBuffer::FreeListEntry * entry = stack_top;
+        stack_top = stack_top->next;
+
+        StackBuffer::free(entry);
+    }
+
+    ~StackGuard()
+    {
+        while (stack_top)
+            pop();
     }
 
 private:
-    static constexpr size_t entrySize = sizeof(libunwind::PrologInfoStackEntry);
-    static constexpr size_t capacity = entrySize * LIBUNWIND_MAX_STACK_SIZE;
-
-    size_t size = 0;
-    char buffer[capacity];
+    StackBuffer::FreeListEntry * stack_top = nullptr;
 };
 }
 
