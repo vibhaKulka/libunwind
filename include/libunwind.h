@@ -47,7 +47,7 @@
 /// We limit the number of frames by 32 and the number of threads by 10000 by default.
 /// So, 320K should be always enough.
 /// However, until memory is unused, it won't be mapped physically. So, use more just in case.
-#define LIBUNWIND_MAX_STACK_SIZE 1048576
+#define LIBUNWIND_MAX_STACK_SIZE 104857600
 
 /* error codes */
 enum {
