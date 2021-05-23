@@ -1514,7 +1514,7 @@ bool UnwindCursor<A, R>::getInfoFromFdeCie(
     const typename CFI_Parser<A>::FDE_Info &fdeInfo,
     const typename CFI_Parser<A>::CIE_Info &cieInfo, pint_t pc,
     uintptr_t dso_base) {
-  typename CFI_Parser<A>::PrologInfo prolog;
+  PrologInfo prolog;
   if (CFI_Parser<A>::parseFDEInstructions(_addressSpace, fdeInfo, cieInfo, pc,
                                           R::getArch(), &prolog)) {
     // Save off parsed FDE info

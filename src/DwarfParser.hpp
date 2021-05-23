@@ -16,6 +16,7 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <sys/mman.h>
 
 #include "libunwind.h"
 #include "dwarf2.h"
@@ -24,6 +25,201 @@
 #include "config.h"
 
 namespace libunwind {
+
+enum {
+  kMaxRegisterNumber = _LIBUNWIND_HIGHEST_DWARF_REGISTER
+};
+
+enum RegisterSavedWhere {
+  kRegisterUnused,
+  kRegisterUndefined,
+  kRegisterInCFA,
+  kRegisterOffsetFromCFA,
+  kRegisterInRegister,
+  kRegisterAtExpression,
+  kRegisterIsExpression
+};
+struct RegisterLocation {
+  RegisterSavedWhere location;
+  bool initialStateSaved;
+  int64_t value;
+};
+/// Information about a frame layout and registers saved determined
+/// by "running" the DWARF FDE "instructions"
+struct PrologInfo {
+  uint32_t          cfaRegister;
+  int32_t           cfaRegisterOffset;  // CFA = (cfaRegister)+cfaRegisterOffset
+  int64_t           cfaExpression;      // CFA = expression
+  uint32_t          spExtraArgSize;
+  RegisterLocation  savedRegisters[kMaxRegisterNumber + 1];
+  enum class InitializeTime { kLazy, kNormal };
+
+  // When saving registers, this data structure is lazily initialized.
+  PrologInfo(InitializeTime IT = InitializeTime::kNormal) {
+    if (IT == InitializeTime::kNormal)
+      memset(this, 0, sizeof(*this));
+  }
+  void checkSaveRegister(uint64_t reg, PrologInfo &initialState) {
+    if (!savedRegisters[reg].initialStateSaved) {
+      initialState.savedRegisters[reg] = savedRegisters[reg];
+      savedRegisters[reg].initialStateSaved = true;
+    }
+  }
+  void setRegister(uint64_t reg, RegisterSavedWhere newLocation,
+                    int64_t newValue, PrologInfo &initialState) {
+    checkSaveRegister(reg, initialState);
+    savedRegisters[reg].location = newLocation;
+    savedRegisters[reg].value = newValue;
+  }
+  void setRegisterLocation(uint64_t reg, RegisterSavedWhere newLocation,
+                            PrologInfo &initialState) {
+    checkSaveRegister(reg, initialState);
+    savedRegisters[reg].location = newLocation;
+  }
+  void setRegisterValue(uint64_t reg, int64_t newValue,
+                        PrologInfo &initialState) {
+    checkSaveRegister(reg, initialState);
+    savedRegisters[reg].value = newValue;
+  }
+  void restoreRegisterToInitialState(uint64_t reg, PrologInfo &initialState) {
+    if (savedRegisters[reg].initialStateSaved)
+      savedRegisters[reg] = initialState.savedRegisters[reg];
+    // else the register still holds its initial state
+  }
+};
+
+struct PrologInfoStackEntry {
+  PrologInfoStackEntry(PrologInfoStackEntry *n, const PrologInfo &i)
+      : next(n), info(i) {}
+  PrologInfoStackEntry *next;
+  PrologInfo info;
+};
+
+/// DWARF instructions DW_CFA_remember_state and DW_CFA_restore_state require stack.
+/// libunwind cannot use malloc to be signal safe.
+/// It also should not use mmap for every allocation as it is too slow.
+/// It can use pre-allocated buffer on stack, but it cannot be large (for coroutines) and cannot be small (it will be not enough).
+/// It also cannot use thread-local preallocated buffer because of coroutines.
+/// It can use pre-allocated global buffer, but thread synchronization is required.
+/// It cannot use mutex because of signal safety.
+/// And it cannot use standard C++ library headers because of libunwind is used to build C++.
+/// So, we use atomic operations over mmaped pre-allocated global buffer.
+class StackBuffer {
+public:
+  struct FreeListEntry {
+    FreeListEntry *next = nullptr;
+    char buffer[sizeof(libunwind::PrologInfoStackEntry)];
+  };
+
+private:
+  static constexpr size_t entrySize = sizeof(FreeListEntry);
+  static constexpr size_t buffer_size = LIBUNWIND_MAX_STACK_SIZE * entrySize;
+  static void *buffer;
+  static size_t next_not_allocated_entry;
+  static void *next_allocated_entry;
+
+  /// Here we use intrinsics because g++ cannot use stdatomic.h, and using c++
+  /// atomics is not possible. Wrappers are just in case other compiler has
+  /// different intrinsics.
+  static bool atomic_compare_exchange_weak_wrapper(void *&ptr, void *&expected,
+                                                   void *desired) {
+    return __atomic_compare_exchange_n(&ptr, &expected, desired, 1,
+                                       __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST);
+  }
+
+  static size_t atomic_fetch_add_wrapper(size_t &ptr, size_t val) {
+    return __atomic_fetch_add(&ptr, val, __ATOMIC_SEQ_CST);
+  }
+
+  static void *atomic_load_wrapper(void *&ptr) {
+    return __atomic_load_n(&ptr, __ATOMIC_SEQ_CST);
+  }
+
+  static void atomic_store_wrapper(void *&ptr, void *val) {
+    __atomic_store_n(&ptr, val, __ATOMIC_SEQ_CST);
+  }
+
+  public:
+    static FreeListEntry *alloc() {
+      /// At first, try to get element from free list.
+      {
+        void *expected = nullptr;
+        void *desired = nullptr;
+        while (!atomic_compare_exchange_weak_wrapper(next_allocated_entry,
+                                                     expected, desired)) {
+          if (expected == nullptr)
+            break;
+
+          desired = static_cast<FreeListEntry *>(expected)->next;
+        }
+
+        if (expected)
+          return static_cast<FreeListEntry *>(expected);
+      }
+
+      size_t prev = atomic_fetch_add_wrapper(next_not_allocated_entry, 1);
+
+      if (prev == 0) {
+        /// I am the one who mmaps memory.
+        void *res = mmap(nullptr, buffer_size, PROT_READ | PROT_WRITE,
+                         MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+
+        if (MAP_FAILED == res)
+          abort();
+
+        atomic_store_wrapper(buffer, res);
+      }
+
+      if ((prev + 1) * entrySize >= buffer_size)
+        abort();
+
+      /// Life loop. In case memory was not allocated yet.
+      void *data = nullptr;
+      while (!data)
+        data = atomic_load_wrapper(buffer);
+
+      return reinterpret_cast<FreeListEntry *>(
+          static_cast<FreeListEntry *>(data) + prev);
+    }
+
+    static void free(FreeListEntry *entry) {
+      void *expected = nullptr;
+      entry->next = nullptr;
+
+      while (!atomic_compare_exchange_weak_wrapper(next_allocated_entry,
+                                                   expected, entry)) {
+        entry->next = static_cast<FreeListEntry *>(expected);
+      }
+    }
+};
+
+class StackGuard {
+public:
+  void *push() {
+    StackBuffer::FreeListEntry *entry = StackBuffer::alloc();
+    entry->next = stack_top;
+    stack_top = entry;
+    return stack_top->buffer;
+  }
+
+  void pop() {
+    if (stack_top == nullptr)
+      abort();
+
+    StackBuffer::FreeListEntry *entry = stack_top;
+    stack_top = stack_top->next;
+
+    StackBuffer::free(entry);
+  }
+
+  ~StackGuard() {
+    while (stack_top)
+      pop();
+  }
+
+private:
+    StackBuffer::FreeListEntry * stack_top = nullptr;
+};
 
 /// CFI_Parser does basic parsing of a CFI (Call Frame Information) records.
 /// See DWARF Spec for details:
@@ -62,92 +258,6 @@ public:
     pint_t  pcStart;
     pint_t  pcEnd;
     pint_t  lsda;
-  };
-
-  enum {
-    kMaxRegisterNumber = _LIBUNWIND_HIGHEST_DWARF_REGISTER
-  };
-  enum RegisterSavedWhere {
-    kRegisterUnused,
-    kRegisterUndefined,
-    kRegisterInCFA,
-    kRegisterOffsetFromCFA,
-    kRegisterInRegister,
-    kRegisterAtExpression,
-    kRegisterIsExpression
-  };
-  struct RegisterLocation {
-    RegisterSavedWhere location;
-    bool initialStateSaved;
-    int64_t value;
-  };
-  /// Information about a frame layout and registers saved determined
-  /// by "running" the DWARF FDE "instructions"
-  struct PrologInfo {
-    uint32_t          cfaRegister;
-    int32_t           cfaRegisterOffset;  // CFA = (cfaRegister)+cfaRegisterOffset
-    int64_t           cfaExpression;      // CFA = expression
-    uint32_t          spExtraArgSize;
-    RegisterLocation  savedRegisters[kMaxRegisterNumber + 1];
-    enum class InitializeTime { kLazy, kNormal };
-
-    // When saving registers, this data structure is lazily initialized.
-    PrologInfo(InitializeTime IT = InitializeTime::kNormal) {
-      if (IT == InitializeTime::kNormal)
-        memset(this, 0, sizeof(*this));
-    }
-    void checkSaveRegister(uint64_t reg, PrologInfo &initialState) {
-      if (!savedRegisters[reg].initialStateSaved) {
-        initialState.savedRegisters[reg] = savedRegisters[reg];
-        savedRegisters[reg].initialStateSaved = true;
-      }
-    }
-    void setRegister(uint64_t reg, RegisterSavedWhere newLocation,
-                     int64_t newValue, PrologInfo &initialState) {
-      checkSaveRegister(reg, initialState);
-      savedRegisters[reg].location = newLocation;
-      savedRegisters[reg].value = newValue;
-    }
-    void setRegisterLocation(uint64_t reg, RegisterSavedWhere newLocation,
-                             PrologInfo &initialState) {
-      checkSaveRegister(reg, initialState);
-      savedRegisters[reg].location = newLocation;
-    }
-    void setRegisterValue(uint64_t reg, int64_t newValue,
-                          PrologInfo &initialState) {
-      checkSaveRegister(reg, initialState);
-      savedRegisters[reg].value = newValue;
-    }
-    void restoreRegisterToInitialState(uint64_t reg, PrologInfo &initialState) {
-      if (savedRegisters[reg].initialStateSaved)
-        savedRegisters[reg] = initialState.savedRegisters[reg];
-      // else the register still holds its initial state
-    }
-  };
-
-  struct PrologInfoStackEntry {
-    PrologInfoStackEntry(PrologInfoStackEntry *n, const PrologInfo &i)
-        : next(n), info(i) {}
-    PrologInfoStackEntry *next;
-    PrologInfo info;
-  };
-
-  struct RememberStack {
-    PrologInfoStackEntry *entry;
-    RememberStack() : entry(nullptr) {}
-    ~RememberStack() {
-#if defined(_LIBUNWIND_REMEMBER_CLEANUP_NEEDED)
-      // Clean up rememberStack. Even in the case where every
-      // DW_CFA_remember_state is paired with a DW_CFA_restore_state,
-      // parseInstructions can skip restore opcodes if it reaches the target PC
-      // and stops interpreting, so we have to make sure we don't leak memory.
-      while (entry) {
-        PrologInfoStackEntry *next = entry->next;
-        _LIBUNWIND_REMEMBER_FREE(entry);
-        entry = next;
-      }
-#endif
-    }
   };
 
   static bool findFDE(A &addressSpace, pint_t pc, pint_t ehSectionStart,
@@ -408,7 +518,8 @@ bool CFI_Parser<A>::parseFDEInstructions(A &addressSpace,
   // the dependency on new/malloc but the below for loop can not be refactored
   // into functions. Entry could be saved during the processing of a CIE and
   // restored by an FDE.
-  RememberStack rememberStack;
+  StackGuard stack;
+  PrologInfoStackEntry *rememberStack = nullptr;
 
   struct ParseInfo {
     pint_t instructions;
@@ -543,13 +654,11 @@ bool CFI_Parser<A>::parseFDEInstructions(A &addressSpace,
       case DW_CFA_remember_state: {
         // Avoid operator new because that would be an upward dependency.
         // Avoid malloc because it needs heap allocation.
-        PrologInfoStackEntry *entry =
-            (PrologInfoStackEntry *)_LIBUNWIND_REMEMBER_ALLOC(
-                sizeof(PrologInfoStackEntry));
+        PrologInfoStackEntry *entry = (PrologInfoStackEntry *)stack.push();
         if (entry != NULL) {
-          entry->next = rememberStack.entry;
+          entry->next = rememberStack;
           entry->info = *results;
-          rememberStack.entry = entry;
+          rememberStack = entry;
         } else {
           return false;
         }
@@ -557,11 +666,11 @@ bool CFI_Parser<A>::parseFDEInstructions(A &addressSpace,
         break;
       }
       case DW_CFA_restore_state:
-        if (rememberStack.entry != NULL) {
-          PrologInfoStackEntry *top = rememberStack.entry;
+        if (rememberStack != NULL) {
+          PrologInfoStackEntry *top = rememberStack;
           *results = top->info;
-          rememberStack.entry = top->next;
-          _LIBUNWIND_REMEMBER_FREE(top);
+          rememberStack = top->next;
+          stack.pop();
         } else {
           return false;
         }

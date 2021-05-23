@@ -49,6 +49,12 @@
   #define LIBUNWIND_CURSOR_ALIGNMENT_ATTR
 #endif
 
+/// The limit on number of frames in total from all threads.
+/// We limit the number of frames by 32 and the number of threads by 10000 by default.
+/// So, 320K should be always enough.
+/// However, until memory is unused, it won't be mapped physically. So, use more just in case.
+#define LIBUNWIND_MAX_STACK_SIZE 1048576
+
 /* error codes */
 enum {
   UNW_ESUCCESS      = 0,     /* no error */
