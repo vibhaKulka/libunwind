@@ -107,6 +107,9 @@ if (APPLE)
   endif ()
 endif ()
 
+# disable sanitizers
+list(APPEND LIBUNWIND_COMPILE_FLAGS -fno-sanitize=all)
+
 string(REPLACE ";" " " LIBUNWIND_COMPILE_FLAGS "${LIBUNWIND_COMPILE_FLAGS}")
 string(REPLACE ";" " " LIBUNWIND_CXX_FLAGS "${LIBUNWIND_CXX_FLAGS}")
 string(REPLACE ";" " " LIBUNWIND_C_FLAGS "${LIBUNWIND_C_FLAGS}")
@@ -130,6 +133,7 @@ if (LIBUNWIND_ENABLE_SHARED)
     target_compile_options(unwind_shared PRIVATE -fno-rtti)
   endif()
   target_link_libraries(unwind_shared PRIVATE ${LIBUNWIND_LIBRARIES})
+  target_compile_definitions(unwind_shared PRIVATE _LIBUNWIND_NO_HEAP=1)
   set_target_properties(unwind_shared PROPERTIES
     CXX_EXTENSIONS OFF
     CXX_STANDARD 11
@@ -155,6 +159,7 @@ if (LIBUNWIND_ENABLE_STATIC)
     target_compile_options(unwind_static PRIVATE -fno-rtti)
   endif()
   target_link_libraries(unwind_static PRIVATE ${LIBUNWIND_LIBRARIES})
+  target_compile_definitions(unwind_static PRIVATE _LIBUNWIND_NO_HEAP=1)
   set_target_properties(unwind_static PROPERTIES
     CXX_EXTENSIONS OFF
     CXX_STANDARD 11

@@ -251,7 +251,7 @@ inline int64_t LocalAddressSpace::getSLEB128(pint_t &addr, pint_t end) {
   } while (byte & 0x80);
   // sign extend negative numbers
   if ((byte & 0x40) != 0 && bit < 64)
-    result |= (-1ULL) << bit;
+    result |= static_cast<int64_t>((-1ULL) << bit);
   addr = (pint_t) p;
   return result;
 }
