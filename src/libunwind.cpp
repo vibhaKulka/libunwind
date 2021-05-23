@@ -50,6 +50,8 @@ _LIBUNWIND_HIDDEN int __unw_init_local(unw_cursor_t *cursor,
 # define REGISTER_KIND Registers_arm
 #elif defined(__or1k__)
 # define REGISTER_KIND Registers_or1k
+#elif defined(__hexagon__)
+# define REGISTER_KIND Registers_hexagon
 #elif defined(__mips__) && defined(_ABIO32) && _MIPS_SIM == _ABIO32
 # define REGISTER_KIND Registers_mips_o32
 #elif defined(__mips64)
@@ -58,6 +60,10 @@ _LIBUNWIND_HIDDEN int __unw_init_local(unw_cursor_t *cursor,
 # warning The MIPS architecture is not supported with this ABI and environment!
 #elif defined(__sparc__)
 # define REGISTER_KIND Registers_sparc
+#elif defined(__riscv)
+# define REGISTER_KIND Registers_riscv
+#elif defined(__ve__)
+# define REGISTER_KIND Registers_ve
 #else
 # error Architecture not supported
 #endif
@@ -171,8 +177,7 @@ _LIBUNWIND_HIDDEN int __unw_get_proc_info(unw_cursor_t *cursor,
   co->getInfo(info);
   if (info->end_ip == 0)
     return UNW_ENOINFO;
-  else
-    return UNW_ESUCCESS;
+  return UNW_ESUCCESS;
 }
 _LIBUNWIND_WEAK_ALIAS(__unw_get_proc_info, unw_get_proc_info)
 
@@ -194,8 +199,7 @@ _LIBUNWIND_HIDDEN int __unw_get_proc_name(unw_cursor_t *cursor, char *buf,
   AbstractUnwindCursor *co = (AbstractUnwindCursor *)cursor;
   if (co->getFunctionName(buf, bufLen, offset))
     return UNW_ESUCCESS;
-  else
-    return UNW_EUNSPEC;
+  return UNW_EUNSPEC;
 }
 _LIBUNWIND_WEAK_ALIAS(__unw_get_proc_name, unw_get_proc_name)
 
@@ -236,7 +240,7 @@ _LIBUNWIND_HIDDEN void __unw_save_vfp_as_X(unw_cursor_t *cursor) {
   AbstractUnwindCursor *co = (AbstractUnwindCursor *)cursor;
   return co->saveVFPAsX();
 }
-_LIBUNWIND_WEAK_ALIAS(__unw_save_vfp_as_X, unw_save_cfp_as_X)
+_LIBUNWIND_WEAK_ALIAS(__unw_save_vfp_as_X, unw_save_vfp_as_X)
 #endif
 
 
@@ -246,9 +250,7 @@ _LIBUNWIND_HIDDEN void __unw_iterate_dwarf_unwind_cache(void (*func)(
     unw_word_t ip_start, unw_word_t ip_end, unw_word_t fde, unw_word_t mh)) {
   _LIBUNWIND_TRACE_API("__unw_iterate_dwarf_unwind_cache(func=%p)",
                        reinterpret_cast<void *>(func));
-#if !defined(_LIBUNWIND_NO_HEAP)
   DwarfFDECache<LocalAddressSpace>::iterateCacheEntries(func);
-#endif
 }
 _LIBUNWIND_WEAK_ALIAS(__unw_iterate_dwarf_unwind_cache,
                       unw_iterate_dwarf_unwind_cache)
@@ -263,12 +265,10 @@ void __unw_add_dynamic_fde(unw_word_t fde) {
   if (message == NULL) {
     // dynamically registered FDEs don't have a mach_header group they are in.
     // Use fde as mh_group
-#if !defined(_LIBUNWIND_NO_HEAP)
     unw_word_t mh_group = fdeInfo.fdeStart;
     DwarfFDECache<LocalAddressSpace>::add((LocalAddressSpace::pint_t)mh_group,
                                           fdeInfo.pcStart, fdeInfo.pcEnd,
                                           fdeInfo.fdeStart);
-#endif
   } else {
     _LIBUNWIND_DEBUG_LOG("__unw_add_dynamic_fde: bad fde: %s", message);
   }
@@ -277,37 +277,11 @@ void __unw_add_dynamic_fde(unw_word_t fde) {
 /// IPI: for __deregister_frame()
 void __unw_remove_dynamic_fde(unw_word_t fde) {
   // fde is own mh_group
-#if !defined(_LIBUNWIND_NO_HEAP)
   DwarfFDECache<LocalAddressSpace>::removeAllIn((LocalAddressSpace::pint_t)fde);
-#endif // !defined(_LIBUNWIND_NO_HEAP)
 }
 #endif // defined(_LIBUNWIND_SUPPORT_DWARF_UNWIND)
 #endif // !defined(__USING_SJLJ_EXCEPTIONS__)
 
-/// Convenient helper (added for jemalloc)
-int unw_backtrace(void **buffer, int size) {
-  unw_context_t context;
-  unw_cursor_t cursor;
-  if (unw_getcontext(&context) || unw_init_local(&cursor, &context)) {
-    return 0;
-  }
-
-  unw_word_t ip;
-  int current = 0;
-  while (unw_step(&cursor) > 0) {
-    if (current >= size || unw_get_reg(&cursor, UNW_REG_IP, &ip)) {
-      break;
-    }
-
-    buffer[current++] = reinterpret_cast<void *>(static_cast<uintptr_t>(ip));
-  }
-
-  return current;
-}
-
-void * StackBuffer::buffer = nullptr;
-size_t StackBuffer::next_not_allocated_entry = 0;
-void * StackBuffer::next_allocated_entry = nullptr;
 
 
 // Add logging hooks in Debug builds only
