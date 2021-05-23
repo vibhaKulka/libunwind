@@ -77,6 +77,11 @@ namespace libunwind {
 
 #if defined(_LIBUNWIND_SUPPORT_DWARF_UNWIND)
 /// Cache of recently found FDEs.
+
+// if we can't use heap = we can't cache anything.
+// no need for buffers / rwmutex / class itself
+#if !defined(_LIBUNWIND_NO_HEAP)
+
 template <typename A>
 class _LIBUNWIND_HIDDEN DwarfFDECache {
   typedef typename A::pint_t pint_t;
@@ -213,6 +218,8 @@ void DwarfFDECache<A>::iterateCacheEntries(void (*func)(
   }
   _LIBUNWIND_LOG_IF_FALSE(_lock.unlock());
 }
+
+#endif // !defined(_LIBUNWIND_NO_HEAP)
 #endif // defined(_LIBUNWIND_SUPPORT_DWARF_UNWIND)
 
 
@@ -1552,7 +1559,12 @@ bool UnwindCursor<A, R>::getInfoFromDwarfSection(pint_t pc,
 #endif
   if (!foundFDE) {
     // otherwise, search cache of previously found FDEs.
-    pint_t cachedFDE = DwarfFDECache<A>::findFDE(sects.dso_base, pc);
+    pint_t cachedFDE = 0;
+
+    #if !defined(_LIBUNWIND_NO_HEAP)
+    cachedFDE = DwarfFDECache<A>::findFDE(sects.dso_base, pc);
+    #endif
+
     if (cachedFDE != 0) {
       foundFDE =
           CFI_Parser<A>::findFDE(_addressSpace, pc, sects.dwarf_section,
@@ -1571,6 +1583,7 @@ bool UnwindCursor<A, R>::getInfoFromDwarfSection(pint_t pc,
     if (getInfoFromFdeCie(fdeInfo, cieInfo, pc, sects.dso_base)) {
       // Add to cache (to make next lookup faster) if we had no hint
       // and there was no index.
+  #if !defined(_LIBUNWIND_NO_HEAP)
       if (!foundInCache && (fdeSectionOffsetHint == 0)) {
   #if defined(_LIBUNWIND_SUPPORT_DWARF_INDEX)
         if (sects.dwarf_index_section == 0)
@@ -1578,6 +1591,8 @@ bool UnwindCursor<A, R>::getInfoFromDwarfSection(pint_t pc,
         DwarfFDECache<A>::add(sects.dso_base, fdeInfo.pcStart, fdeInfo.pcEnd,
                               fdeInfo.fdeStart);
       }
+  #endif // !defined(_LIBUNWIND_NO_HEAP)
+
       return true;
     }
   }
@@ -1972,8 +1987,13 @@ void UnwindCursor<A, R>::setInfoBasedOnIPRegister(bool isReturnAddress) {
 #if defined(_LIBUNWIND_SUPPORT_DWARF_UNWIND)
   // There is no static unwind info for this pc. Look to see if an FDE was
   // dynamically registered for it.
-  pint_t cachedFDE = DwarfFDECache<A>::findFDE(DwarfFDECache<A>::kSearchAll,
+  pint_t cachedFDE = 0;
+
+  #if !defined(_LIBUNWIND_NO_HEAP)
+  cachedFDE = DwarfFDECache<A>::findFDE(DwarfFDECache<A>::kSearchAll,
                                                pc);
+  #endif
+
   if (cachedFDE != 0) {
     typename CFI_Parser<A>::FDE_Info fdeInfo;
     typename CFI_Parser<A>::CIE_Info cieInfo;
