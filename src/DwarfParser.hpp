@@ -402,6 +402,8 @@ bool CFI_Parser<A>::parseFDEInstructions(A &addressSpace,
                                          const FDE_Info &fdeInfo,
                                          const CIE_Info &cieInfo, pint_t upToPC,
                                          int arch, PrologInfo *results) {
+  results->cfaRegister = (uint32_t)(-1);
+
   // Alloca is used for the allocation of the rememberStack entries. It removes
   // the dependency on new/malloc but the below for loop can not be refactored
   // into functions. Entry could be saved during the processing of a CIE and
@@ -595,7 +597,7 @@ bool CFI_Parser<A>::parseFDEInstructions(A &addressSpace,
                                results->cfaRegisterOffset);
         break;
       case DW_CFA_def_cfa_expression:
-        results->cfaRegister = 0;
+        results->cfaRegister = (uint32_t)(-1);
         results->cfaExpression = (int64_t)p;
         length = addressSpace.getULEB128(p, instructionsEnd);
         assert(length < static_cast<pint_t>(~0) && "pointer overflow");
