@@ -95,6 +95,143 @@ struct PrologInfoStackEntry {
   PrologInfo info;
 };
 
+/// Here we use intrinsics because g++ cannot use stdatomic.h, and using c++
+/// atomics is not possible. Wrappers are just in case other compiler has
+/// different intrinsics.
+
+template <typename Ptr>
+static bool atomic_compare_exchange_wrapper(Ptr * target, Ptr * compare, Ptr exchange)
+{
+    return __atomic_compare_exchange_n(target, compare, exchange, true, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST);
+}
+
+static size_t atomic_fetch_add_wrapper(size_t * ptr, size_t val) { /// NOLINT
+  return __atomic_fetch_add(ptr, val, __ATOMIC_SEQ_CST);
+}
+
+static void *atomic_load_wrapper(void *&ptr) {
+  return __atomic_load_n(&ptr, __ATOMIC_SEQ_CST);
+}
+
+static void atomic_store_wrapper(void *&ptr, void *val) {
+  __atomic_store_n(&ptr, val, __ATOMIC_SEQ_CST);
+}
+
+
+// struct Node
+// {
+//   Node * next;
+// }
+
+template <typename Node>
+struct LFStack
+{
+public:
+    Node * pop()
+    {
+        size_t move_pending_to_head_counter_before = atomic_fetch_add_wrapper(&move_pending_to_head_counter, 0);
+        Node * pending_before = pending;
+
+        if (atomic_fetch_add_wrapper(&pop_count, 1) == 0)
+        {
+            /// If there are no other allocations in progress then try to move pending list into head
+
+            // If (move_pending_to_head_counter_before == move_pending_to_head_counter) then pending list
+            // was not  freed by other threads. Hence pending list is not used in any concurrent pop
+            // we can move it to head.
+
+            if (pending_before &&
+                move_pending_to_head_counter_before == atomic_fetch_add_wrapper(&move_pending_to_head_counter, 0) &&
+                atomic_compare_exchange_wrapper(&pending, &pending_before, static_cast<Node *>(nullptr)))
+            {
+                /// Pick first node from pending list and return it
+                Node * result = pending_before;
+                pending_before = pending_before->next;
+
+                movePendingListIntoHead(pending_before);
+                atomic_fetch_add_wrapper(&move_pending_to_head_counter, 1);
+                atomic_fetch_add_wrapper(&pop_count, -1);
+
+                return result;
+            }
+        }
+
+        auto * ptr = popImpl();
+        atomic_fetch_add_wrapper(&pop_count, -1);
+
+        return ptr;
+    }
+
+    void push(Node * node)
+    {
+        /// If there is pop in progress move node to pending list
+        if (atomic_fetch_add_wrapper(&pop_count, 0) == 0)
+        {
+            enqueue(&head, node);
+        }
+        else
+            enqueue(&pending, node);
+     }
+
+private:
+    Node * popImpl()
+    {
+        Node * prev_head = head;
+
+        while (prev_head)
+        {
+            Node * prev_head_next = prev_head->next;
+
+            if (atomic_compare_exchange_wrapper(&head, &prev_head, prev_head_next))
+                break;
+        }
+
+        return prev_head;
+    }
+
+    static void enqueue(Node ** list_head, Node * node)
+    {
+        while (true)
+        {
+            Node * prev_head = *list_head;
+            node->next = prev_head;
+
+            if (atomic_compare_exchange_wrapper(list_head, &prev_head, node))
+                break;
+        }
+    }
+
+    void movePendingListIntoHead(Node * pending_list_head)
+    {
+        if (!pending_list_head)
+            return;
+
+        Node * pending_list_tail = pending_list_head;
+        while (pending_list_tail->next)
+            pending_list_tail = pending_list_tail->next;
+
+        while (true)
+        {
+            Node * prev_head = head;
+            pending_list_tail->next = prev_head;
+
+            if (atomic_compare_exchange_wrapper(&head, &prev_head, pending_list_head))
+                break;
+        }
+    }
+
+    Node * head = nullptr;
+    Node * pending = nullptr;
+    size_t pop_count = 0;
+    size_t move_pending_to_head_counter = 0;
+};
+
+struct FreeListEntry
+{
+  FreeListEntry * next = nullptr;
+  char buffer[sizeof(libunwind::PrologInfoStackEntry)];
+};
+
 /// DWARF instructions DW_CFA_remember_state and DW_CFA_restore_state require stack.
 /// libunwind cannot use malloc to be signal safe.
 /// It also should not use mmap for every allocation as it is too slow.
@@ -105,98 +242,58 @@ struct PrologInfoStackEntry {
 /// And it cannot use standard C++ library headers because of libunwind is used to build C++.
 /// So, we use atomic operations over mmaped pre-allocated global buffer.
 class StackBuffer {
-public:
-  struct FreeListEntry {
-    FreeListEntry *next = nullptr;
-    char buffer[sizeof(libunwind::PrologInfoStackEntry)];
-  };
-
 private:
   static constexpr size_t entrySize = sizeof(FreeListEntry);
   static constexpr size_t buffer_size = LIBUNWIND_MAX_STACK_SIZE * entrySize;
   static void *buffer;
   static size_t next_not_allocated_entry;
   static void *next_allocated_entry;
+  static LFStack<FreeListEntry> stack;
 
-  /// Here we use intrinsics because g++ cannot use stdatomic.h, and using c++
-  /// atomics is not possible. Wrappers are just in case other compiler has
-  /// different intrinsics.
-  static bool atomic_compare_exchange_weak_wrapper(void *&ptr, void *&expected,
-                                                   void *desired) {
-    return __atomic_compare_exchange_n(&ptr, &expected, desired, 1,
-                                       __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST);
-  }
+public:
+  static FreeListEntry *alloc() {
 
-  static size_t atomic_fetch_add_wrapper(size_t &ptr, size_t val) {
-    return __atomic_fetch_add(&ptr, val, __ATOMIC_SEQ_CST);
-  }
+    /// At first, try to get element from stack.
+    {
+      FreeListEntry *entry = stack.pop();
+      if (entry)
+        return static_cast<FreeListEntry *>(entry);
+    }
 
-  static void *atomic_load_wrapper(void *&ptr) {
-    return __atomic_load_n(&ptr, __ATOMIC_SEQ_CST);
-  }
+    size_t prev = atomic_fetch_add_wrapper(&next_not_allocated_entry, 1);
 
-  static void atomic_store_wrapper(void *&ptr, void *val) {
-    __atomic_store_n(&ptr, val, __ATOMIC_SEQ_CST);
-  }
+    if (prev == 0) {
+      /// I am the one who mmaps memory.
+      void *res = mmap(nullptr, buffer_size, PROT_READ | PROT_WRITE,
+                       MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
 
-  public:
-    static FreeListEntry *alloc() {
-      /// At first, try to get element from free list.
-      {
-        void *expected = nullptr;
-        void *desired = nullptr;
-        while (!atomic_compare_exchange_weak_wrapper(next_allocated_entry,
-                                                     expected, desired)) {
-          if (expected == nullptr)
-            break;
-
-          desired = static_cast<FreeListEntry *>(expected)->next;
-        }
-
-        if (expected)
-          return static_cast<FreeListEntry *>(expected);
-      }
-
-      size_t prev = atomic_fetch_add_wrapper(next_not_allocated_entry, 1);
-
-      if (prev == 0) {
-        /// I am the one who mmaps memory.
-        void *res = mmap(nullptr, buffer_size, PROT_READ | PROT_WRITE,
-                         MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-
-        if (MAP_FAILED == res)
-          abort();
-
-        atomic_store_wrapper(buffer, res);
-      }
-
-      if ((prev + 1) * entrySize >= buffer_size)
+      if (MAP_FAILED == res)
         abort();
 
-      /// Life loop. In case memory was not allocated yet.
-      void *data = nullptr;
-      while (!data)
-        data = atomic_load_wrapper(buffer);
-
-      return reinterpret_cast<FreeListEntry *>(
-          static_cast<FreeListEntry *>(data) + prev);
+      atomic_store_wrapper(buffer, res);
     }
 
-    static void free(FreeListEntry *entry) {
-      void *expected = nullptr;
-      entry->next = nullptr;
+    if ((prev + 1) * entrySize >= buffer_size)
+      abort();
 
-      while (!atomic_compare_exchange_weak_wrapper(next_allocated_entry,
-                                                   expected, entry)) {
-        entry->next = static_cast<FreeListEntry *>(expected);
-      }
-    }
+    /// Life loop. In case memory was not allocated yet.
+    void *data = nullptr;
+    while (!data)
+      data = atomic_load_wrapper(buffer);
+
+    return reinterpret_cast<FreeListEntry *>(static_cast<FreeListEntry *>(data) + prev);
+  }
+
+  static void free(FreeListEntry *entry)
+  {
+    stack.push(entry);
+  }
 };
 
 class StackGuard {
 public:
   void *push() {
-    StackBuffer::FreeListEntry *entry = StackBuffer::alloc();
+    FreeListEntry *entry = StackBuffer::alloc();
     entry->next = stack_top;
     stack_top = entry;
     return stack_top->buffer;
@@ -206,7 +303,7 @@ public:
     if (stack_top == nullptr)
       abort();
 
-    StackBuffer::FreeListEntry *entry = stack_top;
+    FreeListEntry *entry = stack_top;
     stack_top = stack_top->next;
 
     StackBuffer::free(entry);
@@ -218,7 +315,7 @@ public:
   }
 
 private:
-    StackBuffer::FreeListEntry * stack_top = nullptr;
+    FreeListEntry * stack_top = nullptr;
 };
 
 /// CFI_Parser does basic parsing of a CFI (Call Frame Information) records.
