@@ -163,7 +163,8 @@ template <typename pint_t>
 static bool isPointerValid(pint_t ptr)
 {
   unsigned char mincore_res = 0;
-  return ptr && (0 == syscall(SYS_mincore, (void*)(ptr / 4096 * 4096), 1, &mincore_res) || errno == ENOSYS);
+  auto page_size = sysconf(_SC_PAGESIZE);
+  return ptr && (0 == syscall(SYS_mincore, (void*)(ptr / page_size * page_size), 1, &mincore_res) || errno == ENOSYS);
 }
 
 template <typename A, typename R>
@@ -236,17 +237,32 @@ int DwarfInstructions<A, R>::stepWithDwarf(A &addressSpace, pint_t pc,
 #if !defined(_LIBUNWIND_IS_NATIVE_ONLY)
         return UNW_ECROSSRASIGNING;
 #else
-        register unsigned long long x17 __asm("x17") = returnAddress;
-        register unsigned long long x16 __asm("x16") = cfa;
-
         // These are the autia1716/autib1716 instructions. The hint instructions
         // are used here as gcc does not assemble autia1716/autib1716 for pre
         // armv8.3a targets.
+
         if (cieInfo.addressesSignedWithBKey)
-          asm("hint 0xe" : "+r"(x17) : "r"(x16)); // autib1716
+        {
+            asm volatile(
+                "mov x17, %x0;"
+                "mov x16, %x1;"
+                "hint 0xe;" // autib1716
+                "mov %0, x17"
+                : "+r"(returnAddress)
+                : "r"(cfa)
+                : "x16", "x17");
+        }
         else
-          asm("hint 0xc" : "+r"(x17) : "r"(x16)); // autia1716
-        returnAddress = x17;
+        {
+            asm volatile(
+                "mov x17, %x0;"
+                "mov x16, %x1;"
+                "hint 0xc;" // autia1716
+                "mov %0, x17"
+                : "+r"(returnAddress)
+                : "r"(cfa)
+                : "x16", "x17");
+        }
 #endif
       }
 #endif
