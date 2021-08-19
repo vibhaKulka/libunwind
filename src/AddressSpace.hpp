@@ -42,6 +42,11 @@ namespace libunwind {
 #include "EHHeaderParser.hpp"
 #include "Registers.hpp"
 
+#include <unistd.h>
+#include <errno.h>
+#include <sys/syscall.h>
+
+
 #ifdef __APPLE__
 
   struct dyld_unwind_sections
@@ -176,6 +181,21 @@ struct UnwindInfoSections {
 };
 
 
+// Check validity of the pointer.
+// This is a very dirty hack (inspired by original libunwind version).
+// Motivation: sometimes libunwind parse wrong value instead of CFA.
+// We check that memory address belongs to our process by issuing "mincore" syscall.
+// Actually we don't care if the address is in core or not, we only check return code.
+// We use syscall instead of libc function to avoid Address Sanitizer to argue.
+template <typename pint_t>
+static bool isPointerValid(pint_t ptr)
+{
+  unsigned char mincore_res = 0;
+  auto page_size = sysconf(_SC_PAGESIZE);
+  return ptr && (0 == syscall(SYS_mincore, (void*)(ptr / page_size * page_size), 1, &mincore_res) || errno == ENOSYS);
+}
+
+
 /// LocalAddressSpace is used as a template parameter to UnwindCursor when
 /// unwinding a thread in the same process.  The wrappers compile away,
 /// making local unwinds fast.
@@ -184,31 +204,43 @@ public:
   typedef uintptr_t pint_t;
   typedef intptr_t  sint_t;
   uint8_t         get8(pint_t addr) {
+    if (!isPointerValid(addr))
+      return 0;
     uint8_t val;
     memcpy(&val, (void *)addr, sizeof(val));
     return val;
   }
   uint16_t         get16(pint_t addr) {
+    if (!isPointerValid(addr))
+      return 0;
     uint16_t val;
     memcpy(&val, (void *)addr, sizeof(val));
     return val;
   }
   uint32_t         get32(pint_t addr) {
+    if (!isPointerValid(addr))
+      return 0;
     uint32_t val;
     memcpy(&val, (void *)addr, sizeof(val));
     return val;
   }
   uint64_t         get64(pint_t addr) {
+    if (!isPointerValid(addr))
+      return 0;
     uint64_t val;
     memcpy(&val, (void *)addr, sizeof(val));
     return val;
   }
   double           getDouble(pint_t addr) {
+    if (!isPointerValid(addr))
+      return 0;
     double val;
     memcpy(&val, (void *)addr, sizeof(val));
     return val;
   }
   v128             getVector(pint_t addr) {
+    if (!isPointerValid(addr))
+      return {};
     v128 val;
     memcpy(&val, (void *)addr, sizeof(val));
     return val;
@@ -229,6 +261,8 @@ public:
 };
 
 inline uintptr_t LocalAddressSpace::getP(pint_t addr) {
+  if (!isPointerValid(addr))
+    return 0;
 #if __SIZEOF_POINTER__ == 8
   return get64(addr);
 #else
@@ -236,7 +270,10 @@ inline uintptr_t LocalAddressSpace::getP(pint_t addr) {
 #endif
 }
 
+
 inline uint64_t LocalAddressSpace::getRegister(pint_t addr) {
+  if (!isPointerValid(addr))
+    return 0;
 #if __SIZEOF_POINTER__ == 8 || defined(__mips64)
   return get64(addr);
 #else
