@@ -28,6 +28,20 @@
 
 namespace libunwind {
 
+// Check validity of the CFA.
+// This is a very dirty hack (inspired by original libunwind version).
+// Motivation: sometimes libunwind parse wrong value instead of CFA.
+// We check that memory address belongs to our process by issuing "mincore" syscall.
+// Actually we don't care if the address is in core or not, we only check return code.
+// If Address Sanitizer will argue, replace syscall to inline assembly.
+template <typename pint_t>
+static bool isPointerValid(pint_t ptr)
+{
+  unsigned char mincore_res = 0;
+  auto page_size = sysconf(_SC_PAGESIZE);
+  return ptr && (0 == syscall(SYS_mincore, (void*)(ptr / page_size * page_size), 1, &mincore_res) || errno == ENOSYS);
+}
+
 
 /// DwarfInstructions maps abtract DWARF unwind instructions to a particular
 /// architecture
@@ -86,8 +100,13 @@ typename A::pint_t DwarfInstructions<A, R>::getSavedRegister(
     return (pint_t)addressSpace.getRegister(cfa + (pint_t)savedReg.value);
 
   case kRegisterAtExpression:
-    return (pint_t)addressSpace.getRegister(evaluateExpression(
-        (pint_t)savedReg.value, addressSpace, registers, cfa));
+  {
+    pint_t addr = evaluateExpression((pint_t)savedReg.value, addressSpace, registers, cfa);
+    if (!isPointerValid(addr)) {
+      return 0;
+    }
+    return (pint_t)addressSpace.getRegister(addr);
+  }
 
   case kRegisterIsExpression:
     return evaluateExpression((pint_t)savedReg.value, addressSpace,
@@ -151,21 +170,6 @@ v128 DwarfInstructions<A, R>::getSavedVectorRegister(
 }
 
 
-// Check validity of the CFA.
-// This is a very dirty hack (inspired by original libunwind version).
-// Motivation: sometimes libunwind parse wrong value instead of CFA.
-// We check that memory address belongs to our process by issuing "mincore" syscall.
-// Actually we don't care if the address is in core or not, we only check return code.
-// If Address Sanitizer will argue, replace syscall to inline assembly.
-template <typename pint_t>
-static bool isPointerValid(pint_t ptr)
-{
-  unsigned char mincore_res = 0;
-  auto page_size = sysconf(_SC_PAGESIZE);
-  return ptr && (0 == syscall(SYS_mincore, (void*)(ptr / page_size * page_size), 1, &mincore_res) || errno == ENOSYS);
-}
-
-
 template <typename A, typename R>
 int DwarfInstructions<A, R>::stepWithDwarf(A &addressSpace, pint_t pc,
                                            pint_t fdeStart, R &registers) {
@@ -200,9 +204,12 @@ int DwarfInstructions<A, R>::stepWithDwarf(A &addressSpace, pint_t pc,
             newRegisters.setVectorRegister(
                 i, getSavedVectorRegister(addressSpace, registers, cfa,
                                           prolog.savedRegisters[i]));
-          else if (i == (int)cieInfo.returnAddressRegister)
+          else if (i == (int)cieInfo.returnAddressRegister) {
             returnAddress = getSavedRegister(addressSpace, registers, cfa,
                                              prolog.savedRegisters[i]);
+            if (!returnAddress)
+              return UNW_EBADFRAME;
+          }
           else if (registers.validRegister(i))
             newRegisters.setRegister(
                 i, getSavedRegister(addressSpace, registers, cfa,
