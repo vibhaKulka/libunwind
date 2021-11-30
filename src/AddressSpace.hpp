@@ -439,8 +439,10 @@ struct _LIBUNWIND_HIDDEN dl_iterate_cb_data {
 
 #include "FrameHeaderCache.hpp"
 
+#ifndef CLICKHOUSE_BUILD
 // There should be just one of these per process.
 static FrameHeaderCache ProcessFrameHeaderCache;
+#endif
 
 static bool checkAddrInSegment(const Elf_Phdr *phdr, size_t image_base,
                                dl_iterate_cb_data *cbdata) {
@@ -461,8 +463,10 @@ int findUnwindSectionsByPhdr(struct dl_phdr_info *pinfo, size_t pinfo_size,
   auto cbdata = static_cast<dl_iterate_cb_data *>(data);
   if (pinfo->dlpi_phnum == 0 || cbdata->targetAddr < pinfo->dlpi_addr)
     return 0;
+#ifndef CLICKHOUSE_BUILD
   if (ProcessFrameHeaderCache.find(pinfo, pinfo_size, data))
     return 1;
+#endif
 
   Elf_Addr image_base = calculateImageBase(pinfo);
   bool found_obj = false;
@@ -494,7 +498,9 @@ int findUnwindSectionsByPhdr(struct dl_phdr_info *pinfo, size_t pinfo_size,
       found_obj = checkAddrInSegment(phdr, image_base, cbdata);
     }
     if (found_obj && found_hdr) {
+#ifndef CLICKHOUSE_BUILD
       ProcessFrameHeaderCache.add(cbdata->sects);
+#endif
       return 1;
     }
   }
