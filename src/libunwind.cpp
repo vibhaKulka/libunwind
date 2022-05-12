@@ -58,6 +58,8 @@ _LIBUNWIND_HIDDEN int __unw_init_local(unw_cursor_t *cursor,
 # warning The MIPS architecture is not supported with this ABI and environment!
 #elif defined(__sparc__)
 # define REGISTER_KIND Registers_sparc
+#elif defined(__s390x__)
+# define REGISTER_KIND Registers_s390x
 #else
 # error Architecture not supported
 #endif
