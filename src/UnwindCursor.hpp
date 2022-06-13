@@ -1131,6 +1131,12 @@ private:
   compact_unwind_encoding_t dwarfEncoding(Registers_sparc &) const { return 0; }
 #endif
 
+#if defined (_LIBUNWIND_TARGET_S390X)
+  compact_unwind_encoding_t dwarfEncoding(Registers_s390x &) const {
+    return 0;
+  }
+#endif
+
 #endif // defined(_LIBUNWIND_SUPPORT_DWARF_UNWIND)
 
 #if defined(_LIBUNWIND_SUPPORT_SEH_UNWIND)
