@@ -221,7 +221,9 @@ int DwarfInstructions<A, R>::stepWithDwarf(A &addressSpace, pint_t pc,
 
       // By definition, the CFA is the stack pointer at the call site, so
       // restoring SP means setting it to CFA.
+#if !defined(_LIBUNWIND_TARGET_S390X)
       newRegisters.setSP(cfa);
+#endif
 
 #if defined(_LIBUNWIND_TARGET_AARCH64)
       // If the target is aarch64 then the return address may have been signed
